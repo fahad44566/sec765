@@ -591,13 +591,19 @@ const COLS = [
 ];
 function doGet(e)  { return handle(e); }
 function doPost(e) { return handle(e); }
+const PHOTO_COLS = ['صورة_الأمام','صورة_الخلف','صورة_الأمام_الاستلام','صورة_الخلف_الاستلام'];
 function handle(e) {
   const p = e.parameter || {};
   const b = e.postData ? JSON.parse(e.postData.contents) : {};
   const action = p.action || b.action;
   try {
+    // إصلاح ذاتي لصف العناوين قبل أي عملية — يحمي من حالة نادرة لكن خطيرة: لو انحذف صف العناوين
+    // بالخطأ (يدوياً من الشيت مثلاً)، يصير أول صف بيانات فعلي يُعامَل كعناوين فتفسد كل القراءات
+    const shGuard = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HANDOVER_SHEET);
+    if (shGuard) ensureValidHeader(shGuard);
     if (action === 'init')           return initSheet();
     if (action === 'getAll')         return getAll();
+    if (action === 'getRecord')      return getRecord(p.id || b.id);
     if (action === 'add')            return addRecord(b);
     if (action === 'receive')        return markReceived(b);
     if (action === 'getEmployee')    return getEmployee(p.id);
@@ -606,6 +612,19 @@ function handle(e) {
     if (action === 'cleanupDuplicates') return cleanupDuplicates();
     return out({error:'unknown action'});
   } catch(err) { return out({error:err.message}); }
+}
+function ensureValidHeader(sh) {
+  if (sh.getLastRow() === 0) return; // شيت فارغ تماماً — initSheet يتكفل بإنشاء العناوين
+  const firstCell = String(sh.getRange(1,1).getValue());
+  if (firstCell === 'رقم_الوثيقة' || firstCell === 'رقم_النموذج') return; // العناوين سليمة
+  // صف العناوين تحوّل لصف بيانات (انحذف صف العناوين الأصلي مثلاً) — نُصلحه بإدراج صف عناوين صحيح
+  // فوق البيانات الحالية، بدون فقدان أي سجل
+  sh.insertRowBefore(1);
+  sh.getRange(1,1,1,COLS.length).setValues([COLS]);
+  sh.getRange(1,1,1,COLS.length)
+    .setBackground('#0B2A5A').setFontColor('#FFFFFF')
+    .setFontWeight('bold').setHorizontalAlignment('center');
+  sh.setFrozenRows(1);
 }
 function initSheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -621,6 +640,7 @@ function initSheet() {
   }
   return out({success:true});
 }
+// نسخة خفيفة بدون أعمدة الصور (كبيرة الحجم) — تُستخدم للقائمة العامة والإحصائيات لتفادي تحميل/ثقل غير ضروري
 function getAll() {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HANDOVER_SHEET);
   if (!sh || sh.getLastRow() < 2) return out({data:[]});
@@ -629,10 +649,27 @@ function getAll() {
   // توافق مع شيتات قديمة أُنشئت قبل تصحيح اسم العمود — نطبّع الاسم بدل مطالبة المستخدم بتعديل الشيت يدوياً
   if (headers[0] === 'رقم_النموذج') headers[0] = 'رقم_الوثيقة';
   const data = rows.slice(1).map((r,i) => {
-    const obj = {}; headers.forEach((h,j) => obj[h]=r[j]);
+    const obj = {};
+    headers.forEach((h,j) => { if (PHOTO_COLS.indexOf(h) === -1) obj[h]=r[j]; });
     obj._row = i+2; return obj;
   });
   return out({data});
+}
+// سجل واحد كامل بما فيه الصور — يُستدعى عند فتح تفاصيل/استلام/تصدير PDF لعهدة محددة فقط
+function getRecord(id) {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HANDOVER_SHEET);
+  if (!sh || sh.getLastRow() < 2) return out({record:null});
+  const rows = sh.getDataRange().getValues();
+  const headers = rows[0].slice();
+  if (headers[0] === 'رقم_النموذج') headers[0] = 'رقم_الوثيقة';
+  for (let i=1; i<rows.length; i++) {
+    if (String(rows[i][0]) === String(id)) {
+      const obj = {}; headers.forEach((h,j) => obj[h]=rows[i][j]);
+      obj._row = i+1;
+      return out({record: obj});
+    }
+  }
+  return out({record: null});
 }
 function addRecord(d) {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(HANDOVER_SHEET);
@@ -761,7 +798,7 @@ function out(data) {
     .setMimeType(ContentService.MimeType.JSON);
 }`;
 
-const SHEET_URL = 'https://script.google.com/macros/s/AKfycbzKU8CvHDyLh1y8oGaKf1QClkWrwDVftNkXoAge9eofzEQvPL0WCcMAT1lft80q-j0jzQ/exec';
+const SHEET_URL = 'https://script.google.com/macros/s/AKfycbxgZA_M6y2pUfFEWkJ7dNp9dz-LiVxpfrWrqCAeC4Ku0TSySxs0k2ANFAdL6uc6XRiH2g/exec';
 
 function gateIconSVG(){
   return `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -960,7 +997,6 @@ async function openReceiveForm(docId){
     z.classList.remove('has-img');
   });
   const toThumb=url=>{const m=url.match(/[?&]id=([a-zA-Z0-9_-]+)/);return m?`https://drive.google.com/thumbnail?id=${m[1]}&sz=w400`:url;};
-  const fp=r['صورة_الأمام']||'',bp=r['صورة_الخلف']||'';
   const ph=document.getElementById('r_existingPhotos');
   const renderPhotos=(fSrc,bSrc)=>{
     if(!fSrc&&!bSrc){ph.innerHTML='';return;}
@@ -970,13 +1006,26 @@ async function openReceiveForm(docId){
       ${bSrc?`<div class="drive-photo" onclick="openLightbox('${bSrc}')"><img src="${bSrc}" class="loading" onload="this.classList.remove('loading')" onerror="this.parentElement.innerHTML='<div class=\\'dp-err\\'>⚠️ تعذّر التحميل</div>'"><div class="dp-lbl">الخلف</div></div>`:''}
     </div>`;
   };
+  currentCertId=docId;
+  showPage('receive');
+  showToast('📋 تم تحميل بيانات العهدة');
+
+  // الصور لم تعد ضمن allRecords (استُبعدت من getAll لتخفيف حجم التحديث الدوري) — نجلبها الآن عند فتح
+  // نموذج الاستلام فقط، بدل تحميلها لكل سجل في كل مرة يتحدّث فيها التطبيق
+  ph.innerHTML=`<div style="margin-top:12px;font-size:11px;color:var(--gray)">⏳ جاري تحميل صور التسليم الأصلية...</div>`;
+  const full = await fetchFullRecord(docId);
+  if(currentCertId !== docId) return; // المستخدم غيّر الشاشة قبل اكتمال الجلب
+  if(!full){
+    ph.innerHTML=`<div style="margin-top:12px;font-size:11px;color:var(--red)">⚠️ تعذّر تحميل صور التسليم الأصلية — يمكنك إكمال الاستلام رغم ذلك</div>`;
+    deliverImgs.front=null; deliverImgs.back=null;
+    return;
+  }
+  const fp=full['صورة_الأمام']||'', bp=full['صورة_الخلف']||'';
+
   // عرض فوري بأفضل ما هو متاح
   const fpQuick = fp ? (fp.startsWith('data:')?fp:toThumb(fp)) : '';
   const bpQuick = bp ? (bp.startsWith('data:')?bp:toThumb(bp)) : '';
   renderPhotos(fpQuick, bpQuick);
-  currentCertId=docId;
-  showPage('receive');
-  showToast('📋 تم تحميل بيانات العهدة');
 
   // تحويل روابط Drive القديمة إلى base64 بالخلفية لضمان ظهورها في المعاينة والـ PDF
   // الصور base64 تُخزَّن في deliverImgs حتى تستخدمها buildCertHTML عند الضغط على المعاينة
@@ -1328,17 +1377,11 @@ function _doSearch(val){
   });
   const emps=Object.values(empMap);
   if(!emps.length){wrap.innerHTML=`<div class="empty-state"><div class="e-icon">😕</div><p>لا توجد نتائج</p></div>`;return;}
-  const toThumb=url=>{const m=url.match(/[?&]id=([a-zA-Z0-9_-]+)/);return m?`https://drive.google.com/thumbnail?id=${m[1]}&sz=w400`:url;};
   wrap.innerHTML=emps.map(emp=>{
     const total=emp.records.length,pending=emp.records.filter(r=>String(r['الحالة'])==='معلقة').length,done=total-pending;
     const recsHtml=emp.records.slice().reverse().map(r=>{
       const isPend=String(r['الحالة'])==='معلقة';
-      const fp=r['صورة_الأمام']||'',bp=r['صورة_الخلف']||'';
-      const fpT=fp?toThumb(fp):'',bpT=bp?toThumb(bp):'';
-      const photos=(fpT||bpT)?`<div class="drive-photos" style="margin-top:10px">
-        ${fpT?`<div class="drive-photo" onclick="openLightbox('${fpT}')"><img src="${fpT}" class="loading" onload="this.classList.remove('loading')" onerror="this.parentElement.innerHTML='<div class=\\'dp-err\\'>⚠️ تعذّر</div>'"><div class="dp-lbl">الأمام</div></div>`:''}
-        ${bpT?`<div class="drive-photo" onclick="openLightbox('${bpT}')"><img src="${bpT}" class="loading" onload="this.classList.remove('loading')" onerror="this.parentElement.innerHTML='<div class=\\'dp-err\\'>⚠️ تعذّر</div>'"><div class="dp-lbl">الخلف</div></div>`:''}
-      </div>`:'';
+      // الصور تُجلب عند فتح التفاصيل فقط (👆 أدناه) — لم تعد ضمن نتائج البحث لتخفيف حجم البيانات
       return `<div class="rec-card" style="cursor:pointer;" onclick="viewRecordDetails('${r['رقم_الوثيقة']}')"><div class="rec-card-top">
         <div><span style="font-weight:700;color:#C8960C;font-size:12px">${r['رقم_الوثيقة']||'—'}</span>
         <span style="margin-right:8px;font-size:11px;color:var(--gray)">${r['التاريخ']||''}</span></div>
@@ -1352,8 +1395,8 @@ function _doSearch(val){
           ${r['الرقم_التسلسلي']?`<div class="rec-field"><div class="rf-lbl">Serial</div><div class="rf-val">${r['الرقم_التسلسلي']}</div></div>`:''}
           ${r['اسم_موظف_المستلم']?`<div class="rec-field"><div class="rf-lbl">المستلِم</div><div class="rf-val" style="color:var(--green)">${r['اسم_موظف_المستلم']}</div></div>`:''}
           ${r['تاريخ_الاستلام']?`<div class="rec-field"><div class="rf-lbl">تاريخ الاستلام</div><div class="rf-val" style="color:var(--green)">${r['تاريخ_الاستلام']}</div></div>`:''}
-        </div>${photos}
-        <div style="text-align:center;margin-top:8px;font-size:10px;color:var(--gray);">👆 اضغط لعرض التفاصيل الكاملة</div>
+        </div>
+        <div style="text-align:center;margin-top:8px;font-size:10px;color:var(--gray);">👆 اضغط لعرض التفاصيل الكاملة والصور</div>
         </div></div>`;
     }).join('');
     return `<div class="emp-profile">
@@ -1673,19 +1716,30 @@ async function viewRecordDetails(docId){
   const overlay=document.getElementById('overlay');
   const dlBtn=document.getElementById('dlBtn'); if(dlBtn)dlBtn.style.display='flex';
 
-  // اعرض البطاقة فوراً بأي صور متاحة (base64 تعمل فوراً، روابط Drive قد تفشل لحظياً)
+  // اعرض البطاقة فوراً بالبيانات النصية (الصور لم تعد ضمن allRecords — استُبعدت من getAll لتخفيف
+  // حجم التحديث الدوري كل 30 ثانية؛ تُجلب هنا عند الحاجة فقط لهذا السجل تحديداً)
   document.getElementById('certContent').innerHTML = buildViewOnlyCert(r);
   overlay.classList.add('show');
   overlay.scrollTop=0;
   const modal=overlay.querySelector('.modal');
   if(modal)modal.scrollTop=0;
 
+  const full = await fetchFullRecord(docId);
+  if(viewingRecordId !== docId || !overlay.classList.contains('show')) return;
+  if(!full) return; // البيانات النصية معروضة بالفعل، فقط بدون صور
+  let recCopy = Object.assign({}, r, {
+    'صورة_الأمام': full['صورة_الأمام']||'',
+    'صورة_الخلف': full['صورة_الخلف']||'',
+    'صورة_الأمام_الاستلام': full['صورة_الأمام_الاستلام']||'',
+    'صورة_الخلف_الاستلام': full['صورة_الخلف_الاستلام']||''
+  });
+  document.getElementById('certContent').innerHTML = buildViewOnlyCert(recCopy);
+
   // إذا كانت الصور روابط Drive قديمة (مو base64)، حوّلها بالخلفية واستبدلها في العرض
-  const fUrl = r['صورة_الأمام']||'';
-  const bUrl = r['صورة_الخلف']||'';
+  const fUrl = recCopy['صورة_الأمام']||'';
+  const bUrl = recCopy['صورة_الخلف']||'';
   const needsConv = (fUrl && !fUrl.startsWith('data:')) || (bUrl && !bUrl.startsWith('data:'));
   if(needsConv){
-    const recCopy = Object.assign({}, r);
     if(fUrl && !fUrl.startsWith('data:')){
       const b64 = await fetchImgBase64(fUrl);
       if(b64) recCopy['صورة_الأمام'] = b64;
@@ -1928,10 +1982,12 @@ async function downloadPDF(){
     let pdfFileLabel;
 
     if(viewingRecordId){
-      // ── وضع العرض من نتائج البحث: نبني من بيانات السجل مباشرة، نحوّل صور Drive القديمة إن وُجدت ──
-      const rec = allRecords.find(r=>String(r['رقم_الوثيقة'])===String(viewingRecordId));
-      if(!rec){ throw new Error('السجل غير موجود'); }
-      const recCopy = Object.assign({}, rec);
+      // ── وضع العرض من نتائج البحث: نجلب السجل الكامل بصوره عند الحاجة فقط (لم تعد ضمن allRecords) ──
+      const baseRec = allRecords.find(r=>String(r['رقم_الوثيقة'])===String(viewingRecordId));
+      if(!baseRec){ throw new Error('السجل غير موجود'); }
+      showLoading('جاري تحميل بيانات السجل...');
+      const full = await fetchFullRecord(viewingRecordId);
+      const recCopy = Object.assign({}, baseRec, full || {});
       const fUrl = recCopy['صورة_الأمام']||'';
       const bUrl = recCopy['صورة_الخلف']||'';
       if(fUrl && !fUrl.startsWith('data:')){
@@ -1965,23 +2021,29 @@ async function downloadPDF(){
       let rFront = receiverImgs.front || null;
       let rBack  = receiverImgs.back  || null;
 
-      if(currentMode === 'receive'){
-        const rec = allRecords.find(r=>String(r['رقم_الوثيقة'])===String(currentCertId));
+      // في المسار الطبيعي تكون deliverImgs/receiverImgs معبّأة مسبقاً (من openReceiveForm) — نلجأ
+      // لجلب السجل الكامل من الخادم فقط كحل احتياطي لو كانت ناقصة، بدل الاعتماد على allRecords
+      // (لم تعد تحمل الصور لتخفيف حجم التحديث الدوري)
+      if(currentMode === 'receive' && (!pFront || !pBack || !rFront || !rBack)){
+        const rec = await fetchFullRecord(currentCertId);
         if(rec){
-          const fUrl = rec['صورة_الأمام']||'';
-          const bUrl = rec['صورة_الخلف']||'';
-          if(fUrl.startsWith('data:')) pFront = fUrl;
-          else if(fUrl){ showLoading('جاري تحميل صورة الأمام...'); pFront = await fetchImgBase64(fUrl) || null; }
-          if(bUrl.startsWith('data:')) pBack = bUrl;
-          else if(bUrl){ showLoading('جاري تحميل صورة الخلف...'); pBack = await fetchImgBase64(bUrl) || null; }
-
-          const rfUrl = rec['صورة_الأمام_الاستلام']||'';
-          const rbUrl = rec['صورة_الخلف_الاستلام']||'';
+          if(!pFront){
+            const fUrl = rec['صورة_الأمام']||'';
+            if(fUrl.startsWith('data:')) pFront = fUrl;
+            else if(fUrl){ showLoading('جاري تحميل صورة الأمام...'); pFront = await fetchImgBase64(fUrl) || null; }
+          }
+          if(!pBack){
+            const bUrl = rec['صورة_الخلف']||'';
+            if(bUrl.startsWith('data:')) pBack = bUrl;
+            else if(bUrl){ showLoading('جاري تحميل صورة الخلف...'); pBack = await fetchImgBase64(bUrl) || null; }
+          }
           if(!rFront){
+            const rfUrl = rec['صورة_الأمام_الاستلام']||'';
             if(rfUrl.startsWith('data:')) rFront = rfUrl;
             else if(rfUrl){ showLoading('جاري تحميل صورة الأمام (الاستلام)...'); rFront = await fetchImgBase64(rfUrl) || null; }
           }
           if(!rBack){
+            const rbUrl = rec['صورة_الخلف_الاستلام']||'';
             if(rbUrl.startsWith('data:')) rBack = rbUrl;
             else if(rbUrl){ showLoading('جاري تحميل صورة الخلف (الاستلام)...'); rBack = await fetchImgBase64(rbUrl) || null; }
           }
@@ -2112,16 +2174,19 @@ async function silentRefresh(){
 async function refreshData(silent){
   const btn = document.querySelector('.btn-sm[onclick="refreshData()"]');
   if(btn && !silent){ btn.style.opacity='0.5'; btn.textContent='⏳ جاري التحديث'; }
+  // نفصل جلب السجلات عن جلب أنواع العهد تماماً — سابقاً كان فشل getAll (شبكة بطيئة مثلاً) يمنع
+  // تحميل أنواع العهد نهائياً لأن loadDeviceTypes لم تكن تُستدعى إلا بعد نجاح getAll
+  let getAllError = null;
   try{
     const d=await apiGet('getAll');
     if(d.data){allRecords=d.data;updateCounts();if(selectedGate)refreshGatePanel();}
-    await loadDeviceTypes();
-    if(!silent) showToast('✅ تم التحديث','success');
-  }catch(e){
-    if(!silent) showToast('❌ تعذر التحديث: '+e.message,'error');
-  }finally{
-    if(btn){ btn.style.opacity=''; btn.textContent='🔄 تحديث'; }
+  }catch(e){ getAllError = e; }
+  await loadDeviceTypes(); // لها fallback داخلي دائم لقائمة افتراضية عند الفشل
+  if(!silent){
+    if(getAllError) showToast('❌ تعذر التحديث: '+getAllError.message,'error');
+    else showToast('✅ تم التحديث','success');
   }
+  if(btn){ btn.style.opacity=''; btn.textContent='🔄 تحديث'; }
 }
 
 async function testConnection(){
@@ -2156,6 +2221,11 @@ async function runCleanupDuplicates(){
 }
 
 async function apiGet(action){const r=await fetch(`${sheetUrl}?action=${action}&t=${Date.now()}`);return r.json();}
+// جلب سجل واحد كاملاً (مع الصور) عند الحاجة فقط — getAll لم يعد يحمل الصور لتخفيف حجم البيانات المتكرر كل 30 ثانية
+async function fetchFullRecord(docId){
+  try{ const d = await apiGet('getRecord&id='+encodeURIComponent(docId)); return d.record || null; }
+  catch(_){ return null; }
+}
 // إعادة محاولة لعمليات الحفظ الأساسية (إضافة/استلام) — نفس فلسفة رفع الصور: لا نفقد السجل بسبب انقطاع شبكي مؤقت
 async function apiPostWithRetry(body, maxRetries=3){
   let lastError=null;
